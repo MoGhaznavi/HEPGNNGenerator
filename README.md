@@ -42,6 +42,10 @@ Utils Folder
 - misc.py
     - Helper functions: weighted loss computation, inference logic
 
-main.py - Top-level script: integrates training, testing, and inference
+Main Python File
+- main.py
+   - Top-level script: integrates training, testing, and inference
 
-plot_metrics.py - Script to visualize performance metrics
+Plotting Metrics File
+- plot_metrics.py
+    - Script to visualize performance metrics
