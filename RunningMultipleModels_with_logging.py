@@ -216,6 +216,9 @@ import traceback
 from copy import deepcopy
 from typing import Any, Dict, List, Optional, Tuple
 
+from contextlib import redirect_stdout, redirect_stderr
+from datetime import datetime
+
 # Third-Party Libraries
 import numpy as np
 import pandas as pd
@@ -1199,6 +1202,30 @@ def run_model(model: nn.Module, batch_size: int, save_dir: str, best_model_name:
                   f"Train Loss: {train_results['loss']:.4f} | Train Acc: {train_results['acc']:.4f} | "
                   f"Test Loss: {test_results['loss']:.4f} | Test Acc: {test_results['acc']:.4f}")
 
+        if epoch % 1 == 0:
+            test_generator = test_generator_class(**test_generator_kwargs)
+            final_results_per_event = run_inference_with_generator(model, test_generator, device, debug=debug)
+
+            # Store per-event and concatenated results
+            final_metrics = {
+                **metrics,
+                'final_results_per_event': final_results_per_event,
+                'num_events_evaluated': len(final_results_per_event)
+            }
+            all_preds = np.concatenate([ev['preds'] for ev in final_results_per_event])
+            all_scores = np.concatenate([ev['scores'] for ev in final_results_per_event])
+            all_labels = (np.concatenate([ev['labels'] for ev in final_results_per_event])
+                          if final_results_per_event[0]['labels'] is not None else None)
+            final_metrics.update({
+                'final_preds_concatenated': all_preds,
+                'final_scores_concatenated': all_scores,
+                'final_labels_concatenated': all_labels,
+            })
+
+            # Save final metrics to disk
+            save_data_pickle(os.path.basename(metrics_path), os.path.dirname(metrics_path), final_metrics)
+            print("Wrote final results to {}".format(metrics_path))
+
         # Stop if patience exceeded
         if early_stopping_counter >= patience:
             if not debug:
@@ -1402,6 +1429,35 @@ def train_single_gpu(gpu_id: int, config: Dict, shared_data: Tuple):
         return 1
 
 
+
+
+def train_single_gpu_with_logging(gpu_id: int, config: Dict, shared_data: Tuple):
+    """Wrapper around train_single_gpu that logs stdout/stderr to a file.
+
+    This does not change training behavior; it only redirects printed output
+    from this process to a per-run log file so it can be monitored later.
+    """
+    # Default to the configured save_dir, or current directory if not set
+    save_dir = config.get('save_dir', '.')
+    os.makedirs(save_dir, exist_ok=True)
+
+    # Use model_name and GPU id in the log filename
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    base_name = config.get('model_name', f'gpu_{gpu_id}')
+    safe_base_name = re.sub(r'[^A-Za-z0-9_.-]', '_', str(base_name))
+    log_filename = f"{safe_base_name}_gpu{gpu_id}_{timestamp}.log"
+    log_path = os.path.join(save_dir, log_filename)
+
+    try:
+        with open(log_path, 'w') as f, redirect_stdout(f), redirect_stderr(f):
+            print(f" Logging to {log_path}")
+            # Call the original training function; any prints/exceptions go to the log
+            return train_single_gpu(gpu_id, config, shared_data)
+    except Exception as e:
+        # If logging setup itself fails, fall back to normal behavior
+        print(f" Failed to set up logging for GPU {gpu_id}: {e}")
+        return train_single_gpu(gpu_id, config, shared_data)
+
 def main():
     """
     Coordinate training across multiple GPUs.
@@ -1409,7 +1465,7 @@ def main():
     and summarizes final results.
     """
     print("=" * 50)
-    print(" Multi-GPU Particle Physics Classification Training")
+    print(" Multi-GPU Particle Physics Classification Training (logging)")
     print("=" * 50)
     
     # Load shared data into memory once to avoid redundant reads
@@ -1439,11 +1495,11 @@ def main():
         'weight_decay': 5e-4,
         'epochs': 200,
         'batch_size': 1,
-        'save_dir': "/storage/mxg1065/fixed_batch_size_models",
+        'save_dir': "/storage/afarbin/training/models",
         'resume': True,
         'patience': 20,
         'delta': 0.0001,
-        'debug': False,
+        'debug': True,
         'weighted': False,
         'generator_flags': {  # defaults for the data generator
             'is_bi_directional': True,
@@ -1497,11 +1553,11 @@ def main():
         print(f"      → Train/Test: 70%/30% (events 0-699/700-999)")
 
     # Prompt user before starting multi-GPU training
-    print(f"\n  This will start {len(configs)} training processes.")
-    response = input("Continue? (y/n): ").strip().lower()
-    if response not in ['y', 'yes']:
-        print("Training cancelled.")
-        return
+    #print(f"\n  This will start {len(configs)} training processes.")
+    #response = input("Continue? (y/n): ").strip().lower()
+    #if response not in ['y', 'yes']:
+    #    print("Training cancelled.")
+    #    return
 
     # Spawn one process per GPU and track them for monitoring
     print(f"\n Starting training processes...")
@@ -1523,7 +1579,7 @@ def main():
             # Launch training as a separate process
             print(f"   Starting process on GPU {gpu_id}: {config['description']}")
             p = mp.Process(
-                target=train_single_gpu,
+                target=train_single_gpu_with_logging,
                 args=(gpu_id, config, shared_data),
                 daemon=False
             )
